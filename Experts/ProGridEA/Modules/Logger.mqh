@@ -1,9 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                      Logger.mqh  |
-//|                        ProGridEA – Structured Logging Module      |
+//|                        ProGridEA v2 – Structured Logging Module   |
 //|                                                                  |
 //|  Provides tagged, leveled Print() wrappers so every log line     |
 //|  is easy to filter in the Experts/Journal tab.                   |
+//|  v2: adds CSV-style trade event logging.                         |
 //+------------------------------------------------------------------+
 #ifndef LOGGER_MQH
 #define LOGGER_MQH
@@ -50,6 +51,26 @@ void LogDebug(string module, string msg) { Log(LOG_DEBUG, module, msg); }
 void LogInfo (string module, string msg) { Log(LOG_INFO,  module, msg); }
 void LogWarn (string module, string msg) { Log(LOG_WARN,  module, msg); }
 void LogError(string module, string msg) { Log(LOG_ERROR, module, msg); }
+
+//===================================================================
+// CSV-style event logger (v2)
+//===================================================================
+//  Produces a single-line CSV record per event that can be
+//  extracted from the Journal/Experts tab and parsed in Excel/Python.
+//
+//  Header: CSV,Time,Event,Symbol,Dir,Lots,Price,SL,TP,Profit,Comment
+//===================================================================
+void LogCSV(string event, string symbol, string dir,
+            double lots, double price, double sl, double tp,
+            double profit, string comment)
+{
+   if(!InpCSVLogging) return;
+
+   PrintFormat("CSV,%s,%s,%s,%s,%.2f,%.5f,%.5f,%.5f,%.2f,%s",
+               TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
+               event, symbol, dir,
+               lots, price, sl, tp, profit, comment);
+}
 
 //===================================================================
 // Specialised loggers

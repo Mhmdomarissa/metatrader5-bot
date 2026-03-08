@@ -1,9 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                                   TradeExec.mqh   |
-//|                        ProGridEA – Trade Execution Module         |
+//|                        ProGridEA v2 – Trade Execution Module      |
 //|                                                                  |
 //|  Builds MqlTradeRequest, validates with OrderCheck, sends with   |
 //|  OrderSend, and classifies the retcode outcome.                  |
+//|  v2: ATR-based SL/TP, safer retry (TOO_MANY_REQ retryable),     |
+//|      CSV logging on trade open.                                  |
 //+------------------------------------------------------------------+
 #ifndef TRADEEXEC_MQH
 #define TRADEEXEC_MQH
@@ -17,7 +19,7 @@ enum ENUM_EXEC_OUTCOME
    EXEC_REQUOTE        = 1,   // Requote – can retry
    EXEC_PRICE_CHANGED  = 2,   // Price moved – can retry
    EXEC_NO_MONEY       = 3,   // Insufficient funds
-   EXEC_TOO_MANY_REQ   = 4,   // Throttled
+   EXEC_TOO_MANY_REQ   = 4,   // Throttled – can retry with longer delay
    EXEC_MARKET_CLOSED  = 5,   // Market closed
    EXEC_INVALID        = 6,   // Invalid request / params
    EXEC_FATAL          = 7,   // Non-recoverable error
@@ -141,7 +143,29 @@ bool ValidateRequest(MqlTradeRequest &req, MqlTradeCheckResult &checkResult)
 }
 
 //===================================================================
-// SendOrder – validate + send a trade request
+// IsRetryable – should we retry this outcome? (v2: TOO_MANY_REQ too)
+//===================================================================
+bool IsRetryable(ENUM_EXEC_OUTCOME outcome)
+{
+   return (outcome == EXEC_REQUOTE ||
+           outcome == EXEC_PRICE_CHANGED ||
+           outcome == EXEC_TIMEOUT ||
+           outcome == EXEC_TOO_MANY_REQ);
+}
+
+//===================================================================
+// RetrySleepMs – escalating back-off with a hard cap (v2)
+//===================================================================
+int RetrySleepMs(ENUM_EXEC_OUTCOME outcome, int attempt)
+{
+   int baseMs = (outcome == EXEC_TOO_MANY_REQ) ? 1000 : 300;
+   int ms     = baseMs * (attempt + 1);
+   if(ms > 3000) ms = 3000;   // hard cap
+   return ms;
+}
+
+//===================================================================
+// SendOrder – validate + send a trade request (v2: safer retry)
 //===================================================================
 //  Returns true if the order was accepted by the server.
 //  Fills 'result' with the server outcome.
@@ -169,9 +193,12 @@ bool SendOrder(MqlTradeRequest &req, MqlTradeResult &result)
    {
       if(attempt > 0)
       {
-         LogInfo("TradeExec", StringFormat("Retry %d/%d after %s",
-                  attempt, maxRetries, RetcodeToString(result.retcode)));
-         Sleep(300 * attempt);   // escalating back-off
+         ENUM_EXEC_OUTCOME prevOutcome = ClassifyRetcode(result.retcode);
+         int sleepMs = RetrySleepMs(prevOutcome, attempt);
+
+         LogInfo("TradeExec", StringFormat("Retry %d/%d after %s – sleeping %dms",
+                  attempt, maxRetries, RetcodeToString(result.retcode), sleepMs));
+         Sleep(sleepMs);
 
          //--- Refresh price for market orders
          if(req.action == TRADE_ACTION_DEAL)
@@ -200,14 +227,15 @@ bool SendOrder(MqlTradeRequest &req, MqlTradeResult &result)
          return true;
       }
 
-      //--- Retryable? (requote, price changed, timeout/connection)
-      if(outcome == EXEC_REQUOTE || outcome == EXEC_PRICE_CHANGED || outcome == EXEC_TIMEOUT)
+      //--- Retryable?
+      if(IsRetryable(outcome))
       {
          LogWarn("TradeExec", StringFormat("Retryable: %s (attempt %d/%d)",
                   RetcodeToString(result.retcode), attempt + 1, maxRetries + 1));
          if(attempt < maxRetries)
             continue;   // try again
          // else fall through – exhausted
+         LogError("TradeExec", StringFormat("All %d retries exhausted – giving up", maxRetries + 1));
       }
 
       //--- Non-retryable or retries exhausted – log and exit
@@ -215,9 +243,6 @@ bool SendOrder(MqlTradeRequest &req, MqlTradeResult &result)
       {
          case EXEC_NO_MONEY:
             LogError("TradeExec", "Insufficient funds – trade blocked");
-            break;
-         case EXEC_TOO_MANY_REQ:
-            LogWarn("TradeExec", "Too many requests – backing off");
             break;
          case EXEC_MARKET_CLOSED:
             LogWarn("TradeExec", "Market closed – cannot trade now");
@@ -239,8 +264,9 @@ bool SendOrder(MqlTradeRequest &req, MqlTradeResult &result)
 //===================================================================
 // OpenMarketOrder – high-level wrapper used by the main EA
 //===================================================================
-//  Computes SL/TP prices from point distances, calculates lot size,
-//  builds and sends the request.  Returns true on success.
+//  v2: supports SLTP_FIXED and SLTP_ATR modes.
+//  Computes SL/TP, calculates lot size, builds and sends request.
+//  Returns true on success.
 //===================================================================
 bool OpenMarketOrder(string symbol,
                      ENUM_SIGNAL signal,
@@ -253,21 +279,46 @@ bool OpenMarketOrder(string symbol,
    double point   = GetPoint(symbol);
    double price   = (signal == SIGNAL_BUY) ? GetAsk(symbol) : GetBid(symbol);
 
-   //--- Compute SL / TP prices
-   double slPrice = 0, tpPrice = 0;
-   if(InpStopLoss > 0)
+   //--- Determine SL / TP in points
+   double slPoints = 0, tpPoints = 0;
+
+   if(InpSLTPMode == SLTP_ATR)
    {
-      slPrice = (signal == SIGNAL_BUY) ? price - InpStopLoss * point
-                                       : price + InpStopLoss * point;
+      //--- ATR-based SL/TP (v2)
+      double atr = GetCurrentATR();
+      if(atr <= 0 || point <= 0)
+      {
+         LogWarn("TradeExec", "ATR unavailable – skipping trade");
+         return false;
+      }
+      double atrPoints = atr / point;   // convert ATR value to points
+      slPoints = atrPoints * InpATRMultSL;
+      tpPoints = atrPoints * InpATRMultTP;
+      LogDebug("TradeExec", StringFormat("ATR=%.5f atrPts=%.0f slPts=%.0f tpPts=%.0f",
+                atr, atrPoints, slPoints, tpPoints));
    }
-   if(InpTakeProfit > 0)
+   else
    {
-      tpPrice = (signal == SIGNAL_BUY) ? price + InpTakeProfit * point
-                                       : price - InpTakeProfit * point;
+      //--- Fixed-point SL/TP
+      slPoints = InpStopLoss;
+      tpPoints = InpTakeProfit;
    }
 
-   //--- Lot sizing
-   double lots = CalculateLotSize(symbol, InpStopLoss);
+   //--- Compute SL / TP prices
+   double slPrice = 0, tpPrice = 0;
+   if(slPoints > 0)
+   {
+      slPrice = (signal == SIGNAL_BUY) ? price - slPoints * point
+                                       : price + slPoints * point;
+   }
+   if(tpPoints > 0)
+   {
+      tpPrice = (signal == SIGNAL_BUY) ? price + tpPoints * point
+                                       : price - tpPoints * point;
+   }
+
+   //--- Lot sizing (uses SL in points for risk-per-trade mode)
+   double lots = CalculateLotSize(symbol, slPoints);
 
    //--- Build request
    MqlTradeRequest req;
@@ -278,7 +329,13 @@ bool OpenMarketOrder(string symbol,
    bool ok = SendOrder(req, result);
 
    if(ok)
-      RiskRecordTrade();   // Update cooldown timestamp
+   {
+      RiskRecordTrade();   // Update cooldown + daily trade count
+
+      //--- CSV log on successful open (v2)
+      string dir = (signal == SIGNAL_BUY) ? "BUY" : "SELL";
+      LogCSV("OPEN", symbol, dir, lots, result.price, req.sl, req.tp, 0, comment);
+   }
 
    return ok;
 }

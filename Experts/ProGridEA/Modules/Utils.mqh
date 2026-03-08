@@ -155,16 +155,20 @@ bool IsSymbolTradeable(string symbol)
 //===================================================================
 
 //--- Is the current server time within the configured session window?
-bool IsWithinSession(int startHour, int endHour)
+//    Supports minute-level precision (v2).
+//    startHour:startMin – endHour:endMin.  Overnight windows work too.
+bool IsWithinSession(int startHour, int startMin, int endHour, int endMin)
 {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
-   int hour = dt.hour;
+   int nowMins   = dt.hour * 60 + dt.min;
+   int startMins = startHour * 60 + startMin;
+   int endMins   = endHour   * 60 + endMin;
 
-   if(startHour <= endHour)
-      return (hour >= startHour && hour < endHour);
-   else // Overnight window e.g. 22–06
-      return (hour >= startHour || hour < endHour);
+   if(startMins <= endMins)
+      return (nowMins >= startMins && nowMins < endMins);
+   else // Overnight window e.g. 22:30–06:00
+      return (nowMins >= startMins || nowMins < endMins);
 }
 
 //===================================================================

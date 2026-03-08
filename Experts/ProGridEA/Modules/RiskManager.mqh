@@ -1,9 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 RiskManager.mqh   |
-//|                        ProGridEA – Risk & Safeguard Module        |
+//|                        ProGridEA v2 – Risk & Safeguard Module     |
 //|                                                                  |
 //|  Every pre-trade and account-level safety check lives here.      |
 //|  Returns clear pass/fail with a reason string.                   |
+//|  v2: daily trade count, loss cooldown, ATR lot sizing support.   |
 //+------------------------------------------------------------------+
 #ifndef RISKMANAGER_MQH
 #define RISKMANAGER_MQH
@@ -15,6 +16,8 @@ double   g_dayStartBalance  = 0;      // Balance at start of trading day
 datetime g_dayStartDate     = 0;      // Date of last recorded day-start
 datetime g_lastTradeTime    = 0;      // Time of most recent trade executed
 double   g_peakEquity       = 0;      // Highest equity since EA start (for DD guard)
+int      g_dailyTradeCount  = 0;      // Number of trades opened today (v2)
+datetime g_lastLossTime     = 0;      // Time of last losing deal close (v2)
 
 //===================================================================
 // RiskInit – call from OnInit
@@ -23,6 +26,8 @@ void RiskInit()
 {
    g_dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    g_peakEquity      = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_dailyTradeCount = 0;
+   g_lastLossTime    = 0;
 
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
@@ -47,7 +52,8 @@ void RiskNewDayCheck()
    {
       g_dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
       g_dayStartDate    = today;
-      LogInfo("Risk", StringFormat("New day detected – resetting daily PnL baseline to %.2f", g_dayStartBalance));
+      g_dailyTradeCount = 0;   // reset daily trade counter
+      LogInfo("Risk", StringFormat("New day – baseline=%.2f dailyTrades reset", g_dayStartBalance));
    }
 }
 
@@ -59,6 +65,14 @@ void RiskUpdateEquity()
    double eq = AccountInfoDouble(ACCOUNT_EQUITY);
    if(eq > g_peakEquity)
       g_peakEquity = eq;
+}
+
+//===================================================================
+// Record a losing deal (v2) – called from OnTradeTransaction
+//===================================================================
+void RiskRecordLoss()
+{
+   g_lastLossTime = TimeCurrent();
 }
 
 //===================================================================
@@ -81,8 +95,9 @@ bool PreTradeCheck(string symbol, long magic, string &reason)
       return false;
    }
 
-   //--- 3) Session filter
-   if(InpUseSessionFilter && !IsWithinSession(InpSessionStartHour, InpSessionEndHour))
+   //--- 3) Session filter (v2: minute-level)
+   if(InpUseSessionFilter && !IsWithinSession(InpSessionStartHour, InpSessionStartMin,
+                                               InpSessionEndHour, InpSessionEndMin))
    {
       reason = "Outside trading session";
       return false;
@@ -110,7 +125,7 @@ bool PreTradeCheck(string symbol, long magic, string &reason)
       }
    }
 
-   //--- 6) Cooldown
+   //--- 6) Cooldown between trades
    if(InpCooldownSec > 0 && g_lastTradeTime > 0)
    {
       long elapsed = (long)(TimeCurrent() - g_lastTradeTime);
@@ -165,6 +180,24 @@ bool PreTradeCheck(string symbol, long magic, string &reason)
       }
    }
 
+   //--- 11) Daily max trades (v2)
+   if(InpMaxDailyTrades > 0 && g_dailyTradeCount >= InpMaxDailyTrades)
+   {
+      reason = StringFormat("Daily trade limit reached (%d / %d)", g_dailyTradeCount, InpMaxDailyTrades);
+      return false;
+   }
+
+   //--- 12) Loss cooldown (v2) – extra waiting period after a losing trade
+   if(InpLossCooldownSec > 0 && g_lastLossTime > 0)
+   {
+      long elapsed = (long)(TimeCurrent() - g_lastLossTime);
+      if(elapsed < InpLossCooldownSec)
+      {
+         reason = StringFormat("Loss cooldown active (%d / %d sec)", (int)elapsed, InpLossCooldownSec);
+         return false;
+      }
+   }
+
    reason = "";
    return true;
 }
@@ -203,17 +236,18 @@ double CalculateLotSize(string symbol, double slPoints)
    double lots = riskMoney / (slPoints * pointValuePerLot);
    lots = NormaliseLots(symbol, lots);
 
-   LogDebug("Risk", StringFormat("RiskCalc: bal=%.2f risk$=%.2f slPts=%.0f pvpl=%.5f → lots=%.2f",
+   LogDebug("Risk", StringFormat("RiskCalc: bal=%.2f risk$=%.2f slPts=%.0f pvpl=%.5f -> lots=%.2f",
              balance, riskMoney, slPoints, pointValuePerLot, lots));
    return lots;
 }
 
 //===================================================================
-// Record that a trade was executed (for cooldown)
+// Record that a trade was executed (for cooldown + daily count)
 //===================================================================
 void RiskRecordTrade()
 {
    g_lastTradeTime = TimeCurrent();
+   g_dailyTradeCount++;
 }
 
 #endif // RISKMANAGER_MQH

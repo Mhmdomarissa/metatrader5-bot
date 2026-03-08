@@ -1,9 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                SignalEngine.mqh   |
-//|                        ProGridEA – Signal / Strategy Module       |
+//|                        ProGridEA v2 – Signal / Strategy Module    |
 //|                                                                  |
 //|  Isolated strategy logic.  Replace the body of GenerateSignal()  |
 //|  with your own entry system – the rest of the EA stays the same. |
+//|  v2: adds ATR indicator for ATR-based SL/TP.                     |
 //+------------------------------------------------------------------+
 #ifndef SIGNALENGINE_MQH
 #define SIGNALENGINE_MQH
@@ -15,7 +16,7 @@ enum ENUM_SIGNAL
 {
    SIGNAL_NONE  = 0,
    SIGNAL_BUY   = 1,
-   SIGNAL_SELL   = 2
+   SIGNAL_SELL  = 2
 };
 
 //===================================================================
@@ -23,18 +24,21 @@ enum ENUM_SIGNAL
 //===================================================================
 int g_handleFastMA = INVALID_HANDLE;
 int g_handleSlowMA = INVALID_HANDLE;
+int g_handleATR    = INVALID_HANDLE;
 
 //===================================================================
 // Buffers for reading indicator values
 //===================================================================
 double g_fastMA[];   // Fast MA values
 double g_slowMA[];   // Slow MA values
+double g_atrBuf[];   // ATR buffer
 
 //===================================================================
 // Init – create indicator handles
 //===================================================================
 bool SignalInit(string symbol, ENUM_TIMEFRAMES tf)
 {
+   //--- MA handles
    g_handleFastMA = iMA(symbol, tf, InpFastMA, 0, InpMAMethod, InpMAPrice);
    g_handleSlowMA = iMA(symbol, tf, InpSlowMA, 0, InpMAMethod, InpMAPrice);
 
@@ -43,6 +47,19 @@ bool SignalInit(string symbol, ENUM_TIMEFRAMES tf)
       LogError("Signal", StringFormat("Failed to create MA handles (fast=%d slow=%d)",
                 g_handleFastMA, g_handleSlowMA));
       return false;
+   }
+
+   //--- ATR handle (for ATR-based SL/TP)
+   if(InpSLTPMode == SLTP_ATR)
+   {
+      g_handleATR = iATR(symbol, tf, InpATRPeriod);
+      if(g_handleATR == INVALID_HANDLE)
+      {
+         LogError("Signal", StringFormat("Failed to create ATR handle (period=%d)", InpATRPeriod));
+         return false;
+      }
+      ArraySetAsSeries(g_atrBuf, true);
+      LogInfo("Signal", StringFormat("ATR indicator created – period=%d", InpATRPeriod));
    }
 
    // Set buffers as timeseries (index 0 = most recent bar)
@@ -61,7 +78,22 @@ void SignalDeinit()
 {
    if(g_handleFastMA != INVALID_HANDLE) { IndicatorRelease(g_handleFastMA); g_handleFastMA = INVALID_HANDLE; }
    if(g_handleSlowMA != INVALID_HANDLE) { IndicatorRelease(g_handleSlowMA); g_handleSlowMA = INVALID_HANDLE; }
+   if(g_handleATR    != INVALID_HANDLE) { IndicatorRelease(g_handleATR);    g_handleATR    = INVALID_HANDLE; }
    LogDebug("Signal", "Indicator handles released");
+}
+
+//===================================================================
+// GetCurrentATR – return ATR value of the last completed bar (v2)
+//===================================================================
+//  Returns 0.0 if ATR is unavailable or handle is invalid.
+//===================================================================
+double GetCurrentATR()
+{
+   if(g_handleATR == INVALID_HANDLE)
+      return 0.0;
+   if(CopyBuffer(g_handleATR, 0, 1, 1, g_atrBuf) < 1)
+      return 0.0;
+   return g_atrBuf[0];
 }
 
 //===================================================================
@@ -89,7 +121,7 @@ ENUM_SIGNAL GenerateSignal()
    // BUY crossover: fast was below slow, now fast is above slow
    if(fastPrev <= slowPrev && fastCurr > slowCurr)
    {
-      LogDebug("Signal", StringFormat("BUY cross: fast[2]=%.5f slow[2]=%.5f → fast[1]=%.5f slow[1]=%.5f",
+      LogDebug("Signal", StringFormat("BUY cross: fast[2]=%.5f slow[2]=%.5f -> fast[1]=%.5f slow[1]=%.5f",
                 fastPrev, slowPrev, fastCurr, slowCurr));
       return SIGNAL_BUY;
    }
@@ -97,7 +129,7 @@ ENUM_SIGNAL GenerateSignal()
    // SELL crossover: fast was above slow, now fast is below slow
    if(fastPrev >= slowPrev && fastCurr < slowCurr)
    {
-      LogDebug("Signal", StringFormat("SELL cross: fast[2]=%.5f slow[2]=%.5f → fast[1]=%.5f slow[1]=%.5f",
+      LogDebug("Signal", StringFormat("SELL cross: fast[2]=%.5f slow[2]=%.5f -> fast[1]=%.5f slow[1]=%.5f",
                 fastPrev, slowPrev, fastCurr, slowCurr));
       return SIGNAL_SELL;
    }
