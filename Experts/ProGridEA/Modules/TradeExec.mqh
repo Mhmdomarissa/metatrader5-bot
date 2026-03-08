@@ -8,8 +8,6 @@
 #ifndef TRADEEXEC_MQH
 #define TRADEEXEC_MQH
 
-#property strict
-
 //===================================================================
 // Retcode classification
 //===================================================================
@@ -22,7 +20,8 @@ enum ENUM_EXEC_OUTCOME
    EXEC_TOO_MANY_REQ   = 4,   // Throttled
    EXEC_MARKET_CLOSED  = 5,   // Market closed
    EXEC_INVALID        = 6,   // Invalid request / params
-   EXEC_FATAL          = 7    // Non-recoverable error
+   EXEC_FATAL          = 7,   // Non-recoverable error
+   EXEC_TIMEOUT        = 8    // Timeout / connection – can retry
 };
 
 ENUM_EXEC_OUTCOME ClassifyRetcode(uint retcode)
@@ -58,6 +57,10 @@ ENUM_EXEC_OUTCOME ClassifyRetcode(uint retcode)
       case TRADE_RETCODE_INVALID_ORDER:
          return EXEC_INVALID;
 
+      case TRADE_RETCODE_TIMEOUT:
+      case TRADE_RETCODE_CONNECTION:
+         return EXEC_TIMEOUT;
+
       default:
          return EXEC_FATAL;
    }
@@ -72,7 +75,7 @@ void BuildMarketOrder(MqlTradeRequest &req,
                       double volume,
                       double sl,
                       double tp,
-                      int magic,
+                      long magic,
                       string comment)
 {
    ZeroMemory(req);
@@ -98,7 +101,7 @@ void BuildMarketOrder(MqlTradeRequest &req,
    req.tp = (tp > 0) ? NormalisePrice(symbol, tp) : 0;
 
    // Deviation (slippage) in points
-   req.deviation = 20;
+   req.deviation = (uint)InpSlippage;
 }
 
 //===================================================================
@@ -150,61 +153,84 @@ bool SendOrder(MqlTradeRequest &req, MqlTradeResult &result)
    //--- Auto-detect filling mode
    req.type_filling = DetectFillingMode(req.symbol);
 
-   //--- Pre-validate
+   //--- Pre-validate (not retryable – structural issues)
    MqlTradeCheckResult checkRes;
    if(!ValidateRequest(req, checkRes))
    {
-      // Map the check retcode into result so the caller can inspect it
       result.retcode = checkRes.retcode;
       result.comment = checkRes.comment;
       return false;
    }
 
-   //--- Log the request
-   LogTradeRequest(req);
+   //--- Retry loop for transient errors
+   int maxRetries = MathMax(0, InpMaxRetries);
 
-   //--- Send
-   bool ok = OrderSend(req, result);
-
-   //--- Log the result
-   LogTradeResult(result);
-
-   //--- Classify
-   ENUM_EXEC_OUTCOME outcome = ClassifyRetcode(result.retcode);
-
-   if(outcome == EXEC_OK)
+   for(int attempt = 0; attempt <= maxRetries; attempt++)
    {
-      LogInfo("TradeExec", StringFormat("Order SUCCESS – ticket=%I64u retcode=%u (%s)",
-               result.order, result.retcode, RetcodeToString(result.retcode)));
-      return true;
-   }
+      if(attempt > 0)
+      {
+         LogInfo("TradeExec", StringFormat("Retry %d/%d after %s",
+                  attempt, maxRetries, RetcodeToString(result.retcode)));
+         Sleep(300 * attempt);   // escalating back-off
 
-   //--- Handle non-OK outcomes with structured logging
-   switch(outcome)
-   {
-      case EXEC_REQUOTE:
-         LogWarn("TradeExec", "Requote received – will retry on next tick");
-         break;
-      case EXEC_PRICE_CHANGED:
-         LogWarn("TradeExec", "Price changed – will retry on next tick");
-         break;
-      case EXEC_NO_MONEY:
-         LogError("TradeExec", "Insufficient funds – trade blocked");
-         break;
-      case EXEC_TOO_MANY_REQ:
-         LogWarn("TradeExec", "Too many requests – backing off");
-         break;
-      case EXEC_MARKET_CLOSED:
-         LogWarn("TradeExec", "Market closed – cannot trade now");
-         break;
-      case EXEC_INVALID:
-         LogError("TradeExec", StringFormat("Invalid request – %s", RetcodeToString(result.retcode)));
-         break;
-      case EXEC_FATAL:
-      default:
-         LogError("TradeExec", StringFormat("Fatal error – retcode=%u (%s)",
-                   result.retcode, RetcodeToString(result.retcode)));
-         break;
+         //--- Refresh price for market orders
+         if(req.action == TRADE_ACTION_DEAL)
+         {
+            if(req.type == ORDER_TYPE_BUY)
+               req.price = GetAsk(req.symbol);
+            else
+               req.price = GetBid(req.symbol);
+         }
+      }
+
+      ZeroMemory(result);
+      LogTradeRequest(req);
+
+      OrderSend(req, result);
+
+      LogTradeResult(result);
+
+      ENUM_EXEC_OUTCOME outcome = ClassifyRetcode(result.retcode);
+
+      //--- Success
+      if(outcome == EXEC_OK)
+      {
+         LogInfo("TradeExec", StringFormat("Order SUCCESS – ticket=%I64u retcode=%u (%s)",
+                  result.order, result.retcode, RetcodeToString(result.retcode)));
+         return true;
+      }
+
+      //--- Retryable? (requote, price changed, timeout/connection)
+      if(outcome == EXEC_REQUOTE || outcome == EXEC_PRICE_CHANGED || outcome == EXEC_TIMEOUT)
+      {
+         LogWarn("TradeExec", StringFormat("Retryable: %s (attempt %d/%d)",
+                  RetcodeToString(result.retcode), attempt + 1, maxRetries + 1));
+         if(attempt < maxRetries)
+            continue;   // try again
+         // else fall through – exhausted
+      }
+
+      //--- Non-retryable or retries exhausted – log and exit
+      switch(outcome)
+      {
+         case EXEC_NO_MONEY:
+            LogError("TradeExec", "Insufficient funds – trade blocked");
+            break;
+         case EXEC_TOO_MANY_REQ:
+            LogWarn("TradeExec", "Too many requests – backing off");
+            break;
+         case EXEC_MARKET_CLOSED:
+            LogWarn("TradeExec", "Market closed – cannot trade now");
+            break;
+         case EXEC_INVALID:
+            LogError("TradeExec", StringFormat("Invalid request – %s", RetcodeToString(result.retcode)));
+            break;
+         default:
+            LogError("TradeExec", StringFormat("Error – retcode=%u (%s)",
+                      result.retcode, RetcodeToString(result.retcode)));
+            break;
+      }
+      break;   // stop retrying
    }
 
    return false;
@@ -218,7 +244,7 @@ bool SendOrder(MqlTradeRequest &req, MqlTradeResult &result)
 //===================================================================
 bool OpenMarketOrder(string symbol,
                      ENUM_SIGNAL signal,
-                     int magic,
+                     long magic,
                      string comment)
 {
    if(signal == SIGNAL_NONE) return false;

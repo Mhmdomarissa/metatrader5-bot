@@ -8,8 +8,6 @@
 #ifndef RISKMANAGER_MQH
 #define RISKMANAGER_MQH
 
-#property strict
-
 //===================================================================
 // Internal state
 //===================================================================
@@ -67,7 +65,7 @@ void RiskUpdateEquity()
 // PreTradeCheck – Master gate.  Call BEFORE opening a new trade.
 // Returns true if ALL checks pass; otherwise sets reason string.
 //===================================================================
-bool PreTradeCheck(string symbol, int magic, string &reason)
+bool PreTradeCheck(string symbol, long magic, string &reason)
 {
    //--- 1) Trading permissions
    if(!IsTradingAllowed())
@@ -155,14 +153,14 @@ bool PreTradeCheck(string symbol, int magic, string &reason)
       }
    }
 
-   //--- 10) Daily loss limit
+   //--- 10) Daily loss limit (equity-based to include unrealised losses)
    if(InpDailyLossLimit > 0 && g_dayStartBalance > 0)
    {
-      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-      double dayLoss = (g_dayStartBalance - balance) / g_dayStartBalance * 100.0;
+      double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+      double dayLoss = (g_dayStartBalance - equity) / g_dayStartBalance * 100.0;
       if(dayLoss >= InpDailyLossLimit)
       {
-         reason = StringFormat("Daily loss limit hit (%.2f%% >= %.2f%%)", dayLoss, InpDailyLossLimit);
+         reason = StringFormat("Daily loss limit hit (%.2f%% >= %.2f%%) [equity-based]", dayLoss, InpDailyLossLimit);
          return false;
       }
    }

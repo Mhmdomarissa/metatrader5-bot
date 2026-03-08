@@ -16,7 +16,6 @@
 #property link        ""
 #property version     "1.00"
 #property description "Modular MT5 Expert Advisor framework"
-#property strict
 
 //===================================================================
 // INCLUDES – order matters: Config first, then Logger, then Utils,
@@ -42,10 +41,16 @@ bool     g_initOK      = false;
 int OnInit()
 {
    LogInfo("Main", "====== ProGridEA OnInit ======");
-   LogInfo("Main", StringFormat("Symbol=%s  Period=%s  Magic=%d",
+   LogInfo("Main", StringFormat("Symbol=%s  Period=%s  Magic=%I64d",
             _Symbol, EnumToString(_Period), InpMagicNumber));
 
    //--- Validate critical inputs
+   if(InpFastMA <= 0 || InpSlowMA <= 0)
+   {
+      LogError("Main", "MA periods must be > 0");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
    if(InpFastMA >= InpSlowMA)
    {
       LogError("Main", "FastMA must be < SlowMA – check inputs");
@@ -55,6 +60,49 @@ int OnInit()
    if(InpFixedLots <= 0 && InpLotMode == LOT_MODE_FIXED)
    {
       LogError("Main", "Fixed lot size must be > 0");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpLotMode == LOT_MODE_RISK && InpRiskPercent <= 0)
+   {
+      LogError("Main", "Risk percent must be > 0 in risk mode");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpUseSessionFilter && (InpSessionStartHour < 0 || InpSessionStartHour > 23
+                           || InpSessionEndHour < 0   || InpSessionEndHour > 23))
+   {
+      LogError("Main", "Session hours must be 0–23");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpMaxDDPercent < 0 || InpMaxDDPercent > 100)
+   {
+      LogError("Main", "Max DD% must be 0–100");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpDailyLossLimit < 0 || InpDailyLossLimit > 100)
+   {
+      LogError("Main", "Daily loss limit must be 0–100");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpUseTrailingStop && InpTrailStartPts <= 0)
+   {
+      LogError("Main", "Trailing start must be > 0 when trailing is enabled");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpUseBreakEven && InpBEActivatePts <= 0)
+   {
+      LogError("Main", "Break-even activation must be > 0 when BE is enabled");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(InpSlippage < 0)
+   {
+      LogError("Main", "Slippage must be >= 0");
       return INIT_PARAMETERS_INCORRECT;
    }
 
@@ -196,11 +244,16 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
-   //--- Only log transactions relevant to our magic number
-   //    trans.type covers: ORDER_ADD, DEAL_ADD, POSITION, HISTORY_ADD, etc.
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
    {
-      // A deal was executed on the server
+      //--- Filter by magic: look up the deal in history
+      if(HistoryDealSelect(trans.deal))
+      {
+         long dealMagic = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
+         if(dealMagic != InpMagicNumber)
+            return;   // not our deal – ignore
+      }
+
       LogInfo("TradeTxn", StringFormat("DEAL_ADD deal=%I64u order=%I64u symbol=%s type=%d vol=%.2f price=%.5f",
                trans.deal, trans.order, trans.symbol,
                (int)trans.deal_type, trans.volume, trans.price));
@@ -222,10 +275,11 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    }
    else if(trans.type == TRADE_TRANSACTION_REQUEST)
    {
-      // Server response to our request
-      if(result.retcode != 0)
+      //--- Only log non-success results (DONE/PLACED are success)
+      ENUM_EXEC_OUTCOME outcome = ClassifyRetcode(result.retcode);
+      if(outcome != EXEC_OK)
       {
-         LogInfo("TradeTxn", StringFormat("REQUEST result retcode=%u (%s)",
+         LogWarn("TradeTxn", StringFormat("REQUEST failed retcode=%u (%s)",
                   result.retcode, RetcodeToString(result.retcode)));
       }
    }
@@ -239,6 +293,25 @@ void OnTrade()
 {
    LogDebug("Main", StringFormat("OnTrade – positions=%d orders=%d",
              PositionsTotal(), OrdersTotal()));
+}
+
+//+------------------------------------------------------------------+
+//| OnTester – custom optimisation criterion (Strategy Tester)        |
+//+------------------------------------------------------------------+
+double OnTester()
+{
+   double profitFactor   = TesterStatistics(STAT_PROFIT_FACTOR);
+   double recoveryFactor = TesterStatistics(STAT_RECOVERY_FACTOR);
+   double trades         = TesterStatistics(STAT_TRADES);
+
+   //--- Require minimum trades to avoid curve-fitting
+   if(trades < 10)
+      return 0.0;
+
+   double criterion = profitFactor * recoveryFactor;
+   LogInfo("Tester", StringFormat("OnTester: PF=%.2f RF=%.2f trades=%.0f criterion=%.4f",
+            profitFactor, recoveryFactor, trades, criterion));
+   return criterion;
 }
 
 //+------------------------------------------------------------------+

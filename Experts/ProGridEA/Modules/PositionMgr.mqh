@@ -8,13 +8,18 @@
 #ifndef POSITIONMGR_MQH
 #define POSITIONMGR_MQH
 
-#property strict
-
 //===================================================================
 // ModifySLTP – modify SL/TP on an existing position
 //===================================================================
 bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
 {
+   //--- Ensure position is selected so we can read its symbol
+   if(!PositionSelectByTicket(ticket))
+   {
+      LogWarn("PosMgr", StringFormat("ModifySLTP – cannot select ticket %I64u", ticket));
+      return false;
+   }
+
    MqlTradeRequest req;
    MqlTradeResult  res;
    ZeroMemory(req);
@@ -30,12 +35,19 @@ bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
 
    if(!OrderSend(req, res))
    {
+      //--- NO_CHANGES is harmless – SL/TP already at the requested value
+      if(res.retcode == TRADE_RETCODE_NO_CHANGES)
+      {
+         LogDebug("PosMgr", StringFormat("ModifySLTP no change needed ticket=%I64u", ticket));
+         return true;
+      }
       LogWarn("PosMgr", StringFormat("ModifySLTP FAILED ticket=%I64u retcode=%u (%s)",
                ticket, res.retcode, RetcodeToString(res.retcode)));
       return false;
    }
 
-   if(res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL)
+   if(res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL
+      || res.retcode == TRADE_RETCODE_NO_CHANGES)
    {
       LogDebug("PosMgr", StringFormat("ModifySLTP OK ticket=%I64u", ticket));
       return true;
@@ -55,9 +67,12 @@ bool ModifyPositionSLTP(ulong ticket, double newSL, double newTP)
 void ApplyTrailingStop(ulong ticket)
 {
    if(!InpUseTrailingStop) return;
+   if(!PositionSelectByTicket(ticket)) return;   // re-select to get fresh data
 
    string symbol = PositionGetString(POSITION_SYMBOL);
    double point  = GetPoint(symbol);
+   if(point <= 0) return;   // symbol data not ready
+
    long   posType = PositionGetInteger(POSITION_TYPE);
    double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
    double curSL     = PositionGetDouble(POSITION_SL);
@@ -105,9 +120,12 @@ void ApplyTrailingStop(ulong ticket)
 void ApplyBreakEven(ulong ticket)
 {
    if(!InpUseBreakEven) return;
+   if(!PositionSelectByTicket(ticket)) return;   // re-select to get fresh data
 
    string symbol = PositionGetString(POSITION_SYMBOL);
    double point  = GetPoint(symbol);
+   if(point <= 0) return;   // symbol data not ready
+
    long   posType = PositionGetInteger(POSITION_TYPE);
    double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
    double curSL     = PositionGetDouble(POSITION_SL);
@@ -152,7 +170,7 @@ void ApplyBreakEven(ulong ticket)
 //===================================================================
 //  Called on every tick (or on timer).
 //===================================================================
-void ManagePositions(string symbol, int magic)
+void ManagePositions(string symbol, long magic)
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -175,7 +193,7 @@ void ManagePositions(string symbol, int magic)
 // HasDuplicateDirection – check if we already have a position in
 // the same direction (prevents re-entering the same side)
 //===================================================================
-bool HasDuplicateDirection(string symbol, int magic, ENUM_SIGNAL signal)
+bool HasDuplicateDirection(string symbol, long magic, ENUM_SIGNAL signal)
 {
    if(signal == SIGNAL_NONE) return false;
 

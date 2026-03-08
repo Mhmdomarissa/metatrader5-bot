@@ -8,8 +8,6 @@
 #ifndef SIGNALENGINE_MQH
 #define SIGNALENGINE_MQH
 
-#property strict
-
 //===================================================================
 // Signal enum returned to the main EA
 //===================================================================
