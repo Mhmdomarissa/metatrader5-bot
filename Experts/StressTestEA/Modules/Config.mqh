@@ -75,4 +75,28 @@ input double   InpMinFreeMargin    = 10.0;         // Min free margin to trade (
 input double   InpEmergencyStopPct = 50.0;         // Emergency equity stop (% drop, 0=off)
 input int      InpMaxRetries       = 3;            // Max retries per order
 
+//===================================================================
+// GROUP 8 – ASYNC & LATENCY  (v2)
+//===================================================================
+input string   _G8_                = "══════ Async & Latency ══════";  // ── Section ──
+input bool     InpUseAsync         = false;        // Use OrderSendAsync (non-blocking)
+input bool     InpAdaptiveSlowdown = true;         // Auto slow down on broker throttle
+input int      InpThrottleThreshold = 3;           // Throttle hits before slowdown
+input double   InpSlowdownMultiplier = 2.0;        // Pause multiplier on throttle
+
+//===================================================================
+// GROUP 9 – MARGIN SAFETY  (v2)
+//===================================================================
+input string   _G9_                = "══════ Margin Safety ══════";    // ── Section ──
+input bool     InpMarginAutoClose  = false;        // Auto-close oldest on margin critical
+input double   InpMarginWarningPct = 200.0;        // Margin level % warning threshold
+input bool     InpNotifyOnCritical = false;        // Phone push on margin critical
+
+//===================================================================
+// GROUP 10 – STATISTICS  (v2)
+//===================================================================
+input string   _G10_               = "══════ Statistics ══════";       // ── Section ──
+input int      InpStatsIntervalSec = 10;           // Stats reporting interval (sec)
+input int      InpRPSWindowSec     = 60;           // Rolling RPS window (sec)
+
 #endif // CONFIG_MQH

@@ -66,6 +66,23 @@ void LogCSV(string event, string symbol, string dir,
 }
 
 //===================================================================
+// CSV trade event logger – extended (v2)
+//===================================================================
+//  Header: CSV2,Time,Event,Symbol,Dir,Lots,Price,Retcode,RetcodeText,
+//          LatencyUs,Attempts,Comment
+//===================================================================
+void LogCSVEx(string event, string symbol, string dir,
+              double lots, double price, uint retcode,
+              ulong latencyUs, int attempts, string comment)
+{
+   if(!InpCSVLogging) return;
+   PrintFormat("CSV2,%s,%s,%s,%s,%.4f,%.5f,%u,%s,%I64u,%d,%s",
+               TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
+               event, symbol, dir, lots, price, retcode,
+               RetcodeToString(retcode), latencyUs, attempts, comment);
+}
+
+//===================================================================
 // CSV account snapshot
 //===================================================================
 //  Header: ACCT,Time,Balance,Equity,Margin,FreeMargin,MarginLevel,Positions
@@ -81,6 +98,57 @@ void LogAccountCSV()
                AccountInfoDouble(ACCOUNT_MARGIN_FREE),
                AccountInfoDouble(ACCOUNT_MARGIN_LEVEL),
                PositionsTotal());
+}
+
+//===================================================================
+// CSV account snapshot – extended (v2): includes SO levels
+//===================================================================
+//  Header: ACCT2,Time,Balance,Equity,Margin,FreeMargin,MarginLevel,
+//          SOCallLevel,SOStopOutLevel,Positions
+//===================================================================
+void LogAccountCSVEx()
+{
+   if(!InpCSVLogging) return;
+   PrintFormat("ACCT2,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
+               TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
+               AccountInfoDouble(ACCOUNT_BALANCE),
+               AccountInfoDouble(ACCOUNT_EQUITY),
+               AccountInfoDouble(ACCOUNT_MARGIN),
+               AccountInfoDouble(ACCOUNT_MARGIN_FREE),
+               AccountInfoDouble(ACCOUNT_MARGIN_LEVEL),
+               AccountInfoDouble(ACCOUNT_MARGIN_SO_CALL),
+               AccountInfoDouble(ACCOUNT_MARGIN_SO_SO),
+               PositionsTotal());
+}
+
+//===================================================================
+// CSV stats snapshot (v2)
+//===================================================================
+//  Header: STATS,Time,Attempts,Accepted,Rejected,RPS,
+//          AvgLatencyUs,ThrottleCount,AdaptiveMultiplier
+//===================================================================
+void LogStatsCSV(ulong attempts, ulong accepted, ulong rejected,
+                 double rps, double avgLatencyUs, int throttleCount,
+                 double adaptiveMultiplier)
+{
+   if(!InpCSVLogging) return;
+   PrintFormat("STATS,%s,%I64u,%I64u,%I64u,%.2f,%.0f,%d,%.2f",
+               TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
+               attempts, accepted, rejected, rps, avgLatencyUs,
+               throttleCount, adaptiveMultiplier);
+}
+
+//===================================================================
+// CSV rejection breakdown by retcode (v2)
+//===================================================================
+//  Header: REJECT,Time,Retcode,RetcodeText,Count
+//===================================================================
+void LogRejectionCSV(uint retcode, ulong count)
+{
+   if(!InpCSVLogging) return;
+   PrintFormat("REJECT,%s,%u,%s,%I64u",
+               TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
+               retcode, RetcodeToString(retcode), count);
 }
 
 //===================================================================

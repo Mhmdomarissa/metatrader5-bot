@@ -1,4 +1,4 @@
-# StressTestEA – MT5 Rapid-Fire Order Stress Tester
+# StressTestEA v2 – MT5 High-Frequency Order Stress Tester
 
 > **DEMO / STRESS-TEST USE ONLY.**
 > This EA sends market orders as aggressively as the broker and platform
@@ -7,19 +7,38 @@
 
 ---
 
+## What's New in v2
+
+| Feature | Description |
+|---------|-------------|
+| **OrderSendAsync** | Non-blocking order sending — fire requests without waiting for server response |
+| **Latency measurement** | `GetMicrosecondCount()` tracks per-request latency (µs precision) |
+| **Broker throttle detection** | Counts consecutive `TOO_MANY_REQUESTS` responses |
+| **Adaptive slowdown** | Auto-increases inter-attempt pause when broker throttles; recovers gradually |
+| **RPS rolling stats** | Requests-per-second computed over a configurable sliding window |
+| **Rejection histogram** | Breakdown of rejection counts by retcode for post-analysis |
+| **Rolling throughput CSV** | Periodic STATS CSV rows with RPS, avg latency, throttle state |
+| **Auto-close on margin** | Closes oldest position when margin level drops below threshold |
+| **Stop-out proximity alerts** | Reads `ACCOUNT_MARGIN_SO_CALL` / `ACCOUNT_MARGIN_SO_SO` levels |
+| **Phone push notifications** | `SendNotification()` on margin critical + emergency stop |
+| **Enhanced CSV** | `CSV2` format adds `latency_us` and `attempt_count` fields |
+| **Extended ACCT2** | Account snapshots now include SO_CALL and SO_STOPOUT levels |
+
+---
+
 ## File Structure
 
 ```
 Experts/
   StressTestEA/
-    StressTestEA.mq5           ← Main EA (attach to chart)
+    StressTestEA.mq5           ← Main EA v2.00 (attach to chart)
     README.md                  ← This file
     Modules/
-      Config.mqh               ← All input parameters
-      Logger.mqh               ← Print logging, CSV events, retcode decoder
-      SymbolInfo.mqh           ← Symbol property cache & helpers
-      PositionManager.mqh      ← Position counting & close-oldest
-      TradeEngine.mqh          ← Order build, send, retry, classify
+      Config.mqh               ← All input parameters (30 inputs, 10 groups)
+      Logger.mqh               ← Print logging, CSV/CSV2 events, retcode decoder
+      SymbolInfo.mqh           ← Symbol cache, margin proximity helpers
+      PositionManager.mqh      ← Position counting, close-oldest, margin-triggered close
+      TradeEngine.mqh          ← Order send (sync/async), retry, latency, throttle
 ```
 
 ---
@@ -66,6 +85,8 @@ Experts/
 
 ## Input Parameters Reference
 
+### Groups 1-7 (Core — same as v1)
+
 | Group | Parameter | Default | Description |
 |-------|-----------|---------|-------------|
 | General | MagicNumber | 777777 | Unique ID to filter this EA's positions |
@@ -91,14 +112,87 @@ Experts/
 | Safety | EmergencyStopPct | 50.0 | Halt if equity drops this % from start |
 | Safety | MaxRetries | 3 | Retry count for requote/timeout |
 
+### Groups 8-10 (New in v2)
+
+| Group | Parameter | Default | Description |
+|-------|-----------|---------|-------------|
+| Async & Latency | UseAsync | false | Use `OrderSendAsync` (non-blocking sends) |
+| Async & Latency | AdaptiveSlowdown | true | Auto slow-down on broker throttle |
+| Async & Latency | ThrottleThreshold | 3 | Consecutive throttle hits before slowdown |
+| Async & Latency | SlowdownMultiplier | 2.0 | Pause multiplier when throttled |
+| Margin Safety | MarginAutoClose | false | Auto-close oldest when margin critical |
+| Margin Safety | MarginWarningPct | 200.0 | Margin level % below which to alert |
+| Margin Safety | NotifyOnCritical | false | Send phone push on margin critical |
+| Statistics | StatsIntervalSec | 10 | Stats reporting interval (seconds) |
+| Statistics | RPSWindowSec | 60 | Rolling window for RPS calculation |
+
 ### Recommended Presets
 
-| Scenario | TimerMs | MaxReq | Burst | Pause | Retries | Notes |
-|----------|---------|--------|-------|-------|---------|-------|
-| Ultra-aggressive | 50 | 10 | ON | 0 | 0 | Max throughput |
-| Moderate | 200 | 3 | OFF | 100 | 2 | Balanced load |
-| Conservative | 1000 | 1 | OFF | 500 | 3 | Gentle probing |
-| Netting rapid-cycle | 50 | 2 | ON | 0 | 1 | BUY+SELL = open/close loop |
+| Scenario | TimerMs | MaxReq | Burst | Async | Adaptive | Notes |
+|----------|---------|--------|-------|-------|----------|-------|
+| Ultra-aggressive | 50 | 10 | ON | ON | ON | Max throughput, async fire-and-forget |
+| Moderate | 200 | 3 | OFF | OFF | ON | Balanced load, sync with retry |
+| Conservative | 1000 | 1 | OFF | OFF | ON | Gentle probing |
+| Latency benchmark | 200 | 1 | OFF | OFF | OFF | Isolate per-request latency |
+| Throttle test | 50 | 20 | ON | ON | ON | Deliberately trigger broker throttle |
+
+---
+
+## v2 Features In Detail
+
+### OrderSendAsync (Non-Blocking)
+
+When `UseAsync = true`, orders are sent via `OrderSendAsync()` which returns
+immediately after dispatching the request. The actual result arrives later
+in `OnTradeTransaction()`. This allows the EA to fire orders rapidly without
+blocking on server round-trips.
+
+- Async results are resolved via a pending map (`request_id` → `send_timestamp`)
+- Latency is measured from send to `OnTradeTransaction` callback
+- CSV2 events: `ASYNC_SENT` when dispatched, `ASYNC_OK` / `ASYNC_FAIL` when resolved
+
+### Latency Measurement
+
+Every order request is timed using `GetMicrosecondCount()`:
+- **Sync mode**: measures from pre-send to post-`OrderSend()` return
+- **Async mode**: measures from pre-`OrderSendAsync()` to `OnTradeTransaction()` callback
+- Average latency is reported in STATS CSV and OnDeinit summary
+- Per-request latency is in every `CSV2` line (`latency_us` field)
+
+### Broker Throttle Detection & Adaptive Slowdown
+
+When the broker returns `TRADE_RETCODE_TOO_MANY_REQUESTS` (10024):
+1. A throttle counter increments
+2. When counter reaches `ThrottleThreshold`, the adaptive multiplier
+   increases by `SlowdownMultiplier` (caps at 10x)
+3. All inter-attempt pauses and retry backoffs are multiplied
+4. On successful sends, the multiplier gradually recovers (x0.9 decay)
+5. Throttle counter decreases every 30s of clean operation
+
+### Margin Safety & Stop-Out Proximity
+
+The EA reads broker stop-out levels at startup:
+- `ACCOUNT_MARGIN_SO_CALL` — margin call level (warning)
+- `ACCOUNT_MARGIN_SO_SO` — stop-out level (forced liquidation)
+
+When `MarginAutoClose = true` and margin level drops below `MarginWarningPct`:
+- Closes up to 3 oldest positions per check
+- Logs warnings with current level, SO call, SO stop-out
+
+When `NotifyOnCritical = true`:
+- Sends push notification via `SendNotification()` (max once per 60s)
+- Also sends notification on emergency equity stop
+- Requires MetaQuotes ID configured: **Tools → Options → Notifications**
+
+### Statistics Engine
+
+Every `StatsIntervalSec` seconds, the EA reports:
+- Total attempts / accepted / rejected
+- Rolling RPS (requests per second) over the window
+- Average latency in microseconds
+- Throttle hit count and adaptive multiplier
+- Position count, equity, margin level
+- Full rejection histogram by retcode
 
 ---
 
@@ -125,17 +219,17 @@ Experts/
 1. Install **MetaTrader 5** from App Store / Google Play.
 2. Log in with the **same trading account** (same broker, same login).
 3. You will see:
-   - **Trade** tab: all open positions (filtered by magic if you check comments).
+   - **Trade** tab: all open positions.
    - **History** tab: closed deals with profit/loss.
-   - **Messages** tab: push notifications (if configured).
-4. The phone app shows **live positions and equity** but does not show
-   EA logs.  Use CSV logging + VPS file access for detailed monitoring.
+   - **Messages** tab: push notifications (if `NotifyOnCritical = true`).
+4. Use CSV logging + VPS file access for detailed monitoring.
 
-### Optional: Push Notifications
+### Push Notification Setup
 
-Add `SendNotification("message")` calls in the EA code to receive
-push alerts on your phone.  Requires configuring your MetaQuotes ID
-in MT5: **Tools → Options → Notifications**.
+1. In MT5 desktop: **Tools → Options → Notifications**.
+2. Enter your **MetaQuotes ID** (shown in the phone app under Settings).
+3. Enable `NotifyOnCritical = true` in the EA inputs.
+4. You'll receive alerts when margin becomes critical or emergency stop triggers.
 
 ---
 
@@ -146,7 +240,7 @@ in MT5: **Tools → Options → Notifications**.
 | **Requote** | 10004 | Retries with fresh price (up to MaxRetries) |
 | **Price changed** | 10020 | Retries with fresh price |
 | **Timeout** | 10008 | Retries with escalating backoff |
-| **Too many requests** | 10024 | Retries with 500ms+ backoff |
+| **Too many requests** | 10024 | Retries with 500ms+ backoff; triggers adaptive slowdown |
 | **No money** | 10019 | Logs REJECTED, skips (no retry) |
 | **Market closed** | 10018 | Skips cycle until market reopens |
 | **Trade disabled** | 10017 | Skips (server or symbol level) |
@@ -177,25 +271,43 @@ in MT5: **Tools → Options → Notifications**.
 
 ## Log Formats
 
-### Trade Events (CSV)
+### Trade Events – v1 compat format (CSV)
 ```
 CSV,2026.03.08 12:00:01,ATTEMPT,EURUSD,BUY,0.0100,1.09500,0,None,try_1
 CSV,2026.03.08 12:00:01,ACCEPTED,EURUSD,BUY,0.0100,1.09502,10009,Done,ticket=12345
-CSV,2026.03.08 12:00:01,REJECTED,EURUSD,SELL,0.0100,1.09498,10019,NoMoney,NoMoney
-CSV,2026.03.08 12:00:02,RETRY,EURUSD,BUY,0.0100,1.09500,10004,Requote,try_1_sleep_100ms
-CSV,2026.03.08 12:00:03,CLOSE,EURUSD,SELL,0.0100,1.09510,10009,Done,ticket=12340
 ```
 
-### Account Snapshots (ACCT)
+### Trade Events – v2 format (CSV2, with latency & attempts)
 ```
-ACCT,2026.03.08 12:00:10,10000.00,9985.50,120.00,9865.50,8321.25,12
+CSV2,2026.03.08 12:00:01,ATTEMPT,EURUSD,BUY,0.0100,1.09500,0,None,0,1,try_1
+CSV2,2026.03.08 12:00:01,ACCEPTED,EURUSD,BUY,0.0100,1.09502,10009,Done,1234,1,ticket=12345
+CSV2,2026.03.08 12:00:01,ASYNC_SENT,EURUSD,BUY,0.0100,1.09500,10008,Placed,89,1,req_id=5001
+CSV2,2026.03.08 12:00:02,ASYNC_OK,EURUSD,BUY,0.0100,1.09502,10009,Done,15234,1,req_id=5001 ticket=12345
+```
+
+### Account Snapshots – v2 (ACCT2, with SO levels)
+```
+ACCT2,2026.03.08 12:00:10,10000.00,9985.50,120.00,9865.50,8321.25,100.00,50.00,12
+```
+Fields: Time, Balance, Equity, Margin, FreeMargin, MarginLevel, SOCallLevel, SOStopOutLevel, Positions
+
+### Stats Snapshots (STATS)
+```
+STATS,2026.03.08 12:00:10,500,480,20,8.00,1234,0,1.00
+```
+Fields: Time, Attempts, Accepted, Rejected, RPS, AvgLatencyUs, ThrottleCount, AdaptiveMultiplier
+
+### Rejection Histogram (REJECT)
+```
+REJECT,2026.03.08 12:00:10,10024,TooManyReq,5
+REJECT,2026.03.08 12:00:10,10004,Requote,12
 ```
 
 ### Extracting CSV from MT5 Logs
 
 1. In MT5: **View → Journal** or **View → Experts**.
 2. Right-click → **Open** to find the log file.
-3. Filter lines starting with `CSV,` or `ACCT,` using grep/Excel/Python.
+3. Filter lines starting with `CSV2,`, `STATS,`, `ACCT2,`, or `REJECT,` using grep/Excel/Python.
 
 ---
 

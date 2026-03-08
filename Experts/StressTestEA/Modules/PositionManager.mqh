@@ -152,4 +152,26 @@ bool CloseOldestPosition(string symbol, long magic)
    return ClosePositionByTicket(ticket);
 }
 
+//===================================================================
+// Close oldest if margin level is critical (v2)
+//===================================================================
+//  Checks the margin level against the warning threshold.  If critical,
+//  closes the oldest position and returns true.  Caller should re-check
+//  margin after this since one close may not be enough.
+//===================================================================
+bool CloseOldestIfMarginCritical(string symbol, long magic, double warningPct)
+{
+   if(!IsMarginCritical(warningPct))
+      return false;
+
+   double mlevel = GetMarginLevel();
+   double soLvl  = GetSOStopOutLevel();
+
+   LogWarn("PosMgr", StringFormat(
+      "Margin CRITICAL: level=%.2f%% warning=%.2f%% SO=%.2f%% – force-closing oldest",
+      mlevel, warningPct, soLvl));
+
+   return CloseOldestPosition(symbol, magic);
+}
+
 #endif // POSITIONMANAGER_MQH

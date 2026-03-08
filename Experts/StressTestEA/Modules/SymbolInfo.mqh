@@ -158,4 +158,48 @@ bool IsTradingAllowedNow(string symbol)
    return true;
 }
 
+//===================================================================
+// Margin proximity helpers (v2)
+//===================================================================
+
+//--- Current account margin level (0 if no positions)
+double GetMarginLevel()
+{
+   return AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+}
+
+//--- Broker's margin call level
+double GetSOCallLevel()
+{
+   return AccountInfoDouble(ACCOUNT_MARGIN_SO_CALL);
+}
+
+//--- Broker's stop-out level
+double GetSOStopOutLevel()
+{
+   return AccountInfoDouble(ACCOUNT_MARGIN_SO_SO);
+}
+
+//--- Is margin level dangerously close to stop-out?
+//    Triggers when margin level is non-zero AND below warningPct.
+//    warningPct is typically higher than the broker SO level
+//    (e.g. 200% to give an early warning before broker liquidation).
+bool IsMarginCritical(double warningPct)
+{
+   double level = GetMarginLevel();
+   if(level == 0) return false;   // no margin used (no positions)
+   return (level < warningPct);
+}
+
+//--- Proximity to broker stop-out in percent points
+//    Returns how many % points above the SO level we are.
+//    Negative = we're BELOW stop-out (extremely dangerous).
+double MarginProximityToSO()
+{
+   double level = GetMarginLevel();
+   double so    = GetSOStopOutLevel();
+   if(level == 0) return 9999.0;  // no positions, effectively infinite
+   return (level - so);
+}
+
 #endif // SYMBOLINFO_MQH
